@@ -1,0 +1,658 @@
+---
+title: "AQM Week 10 -- Conditional Multinomial Choice Models"
+author: 
+  - Oliver Rittmann
+date: "May 2, 2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    css: css/lab.css
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: true
+    toc_float: true
+    css: css/lab.css
+header-includes:
+   - \usepackage[default]{sourcesanspro}
+   - \usepackage[T1]{fontenc}
+mainfont: SourceSansPro
+---
+
+```{r setup}
+# The first line sets an option for the final document that can be produced from
+# the .Rmd file. Don't worry about it.
+knitr::opts_chunk$set(echo = TRUE)
+
+# First you define which packages you need for your analysis and assign it to 
+# the p_needed object. 
+p_needed <-
+  c("viridis", "knitr", "MASS", "pROC", "nnet", "mlogit")
+
+# Now you check which packages are already installed on your computer.
+# The function installed.packages() returns a vector with all the installed 
+# packages.
+packages <- rownames(installed.packages())
+# Then you check which of the packages you need are not installed on your 
+# computer yet. Essentially you compare the vector p_needed with the vector
+# packages. The result of this comparison is assigned to p_to_install.
+p_to_install <- p_needed[!(p_needed %in% packages)]
+# If at least one element is in p_to_install you then install those missing
+# packages.
+if (length(p_to_install) > 0) {
+  install.packages(p_to_install)
+}
+# Now that all packages are installed on the computer, you can load them for
+# this project. Additionally the expression returns whether the packages were
+# successfully loaded.
+sapply(p_needed, require, character.only = TRUE)
+```
+
+
+---
+
+## Where are we on the AQM road?
+
+  + **Session 1 to 5**: The fundamental prerequisites:
+    + OLS Recap
+    + Matrix Algebra
+    + Intro to Maximum Likelihood Estimation
+  + **Session 6 to 10**: Models for...
+    + ...binary dependent variables (session 6 and 7)
+    + ...ordinal dependent variables (session 8)
+    + ...categorical dependent variables (session 9 and 10)
+  + This week in the lecture (and hw06): Models for...
+    + ...truncated or censored dependent variables 
+
+In the remaining weeks:
+    
+  + **Session 11 to 12**: Sneak peek into more advanced models:
+    + Multi-level models
+    + Bayesian Analysis
+
+The next two weeks in the tutorial:
+  + Clarification of 
+    + "fixed" and "random" effects
+    + Multi-Level data structures and Multi-level models
+
+---
+
+## Program for today
+
+In this session, we will learn about:
+
+1. Multinomial Choice Models: 
+    + Leftovers from last week: OVA Simulation over a range of values.
+2. Conditional Multinomial Choice Models.
+
+---
+
+## Multinomial Choice Leftovers
+
+We start with the essential code from last week
+
+```{r}
+# Load data
+load("raw-data/Nethvote.RData")
+df <- Nethvote
+
+# Likelihood function
+ll_mnl <- function(theta, X, Z) {
+  # declarations
+  k <- ncol(X) # k independent variables
+  J <- ncol(Z) # J choices in the dependent variable
+  
+  # create matrix of betas and set the first category to 0
+  beta <- matrix(0, 
+                 ncol = k, 
+                 nrow = J)
+  beta[-1, ] <- matrix(theta[1:(k * (J - 1))], 
+                       ncol = k, 
+                       byrow = T)
+  
+  # Systematic component: utilities
+  # X_i %*% beta_J in each row (i.e. for each available choice)
+  V <- apply(beta, 1, 
+             function(b) 
+               X %*% b)
+  
+  # Sum of exp(V)
+  Sexp <- apply(V, 1, function(v)
+    sum(exp(v)))
+  
+  # probabilities
+  P <- apply(V, 2, function(v)
+    exp(v) / Sexp)
+  
+  # log-likelihood
+  loglik <- sum(log(P[Z]))
+  return(loglik)
+}
+
+# Data preperation
+cats <- sort(unique(df$vote))  # different categories
+J <- length(unique(df$vote))  # number of categories
+
+Z <- matrix(NA, 
+            nrow = length(df$vote), 
+            ncol = J)  # indicator matrix
+
+for (j in 1:J) {
+  Z[, j] <- df$vote == cats[j]
+}
+colnames(Z) <- cats
+
+X <- as.matrix(cbind(1, df[, 6:11]))
+
+# Model estimation
+startvals <- rep(0, ncol(X) * (J - 1))
+
+res <- optim(
+  startvals,
+  ll_mnl,
+  X = X,
+  Z = Z,
+  method = "BFGS",
+  control = list(fnscale = -1, trace = TRUE),
+  hessian = TRUE
+)
+```
+
+### Exercise: The observed value approach for a range of values
+
+Simulate predicted probabilities and the surrounding uncertainty using the observed value approach to visualize the **effect of income** (eg. a range of 10 values of income -- don't use more, ten will already take a little while to compute).
+
+```{r Exercise I} 
+# Set-up and draw from multivariate normal
+mu <- res$par
+varcov <- solve(-res$hessian)
+
+# Define nsim, J (number of categories) and k (number of independent variables)
+nsim <- 1000
+J <- length(unique(df$vote))  # Number of categories
+k <- ncol(X)
+
+# Set up the sampling distribution
+S <- mvrnorm(nsim, mu, varcov)
+
+# Store in an array similar to what we did in the ll function
+beta_S <- array(0, dim = c(J, k, nsim))
+
+# fill the array with the sampling distribution of betas
+for(sim in 1:nsim) {
+  beta_S[-1, ,sim] <- matrix(S[sim,], 
+                             ncol = k, 
+                             byrow = T)
+}
+
+# start with the scenario (the steps before are the same)
+sel <- which(colnames(X) == "income")
+
+incomeScenario <- quantile(X[, sel], seq(0, 1, length.out = 10))
+
+n_scenarios <- length(incomeScenario)
+
+cases <- array(NA, dim = c(dim(X), 
+                           n_scenarios))
+
+cases[, , ] <- X
+
+for (i in 1:n_scenarios) {
+  cases[, sel, i] <- incomeScenario[i]
+}
+
+# Calculate the utilities V (Systematic component!)
+V <- array(NA, 
+           dim = c(nrow(X),       # number of observations
+                   J,             # number of categories
+                   nsim,          # number of simulations
+                   n_scenarios))  # number of scenarios
+
+# Loop over the scenarios
+for(i in 1:n_scenarios){
+  V[,,,i] <- apply(beta_S[,,], c(1,3), 
+                   function(bs) cases[,,i] %*% bs)
+}
+```
+
+We now have the utilities $V_{ij}$. Next, we want to use this in order to get probabilities. In other words: We want to apply the **link function**:
+
+$$P(y_i=j) = \frac{exp[V_{ij}]}{\sum exp[V_{ik}]}$$
+
+```{r}
+# Now we want to summarize over multiple dimensions (calculate Sexp)
+Sexp <- apply(V, c(1,3,4), function(v) sum(exp(v)))
+
+# With V and Sexp we have everything to get P
+P <- array(NA, c(nsim, J, n_scenarios))
+
+for (scen in 1:n_scenarios) {
+  for (category in 1:J) {
+    P[, category, scen] <- 
+      apply(exp(V[, category, , scen]) / Sexp[, , scen], 2, mean)
+  }
+}
+
+# Summarize to get our quantities of interest
+
+# solution 1: with apply
+QoImean <- apply(P, c(2, 3), mean)
+QoICI <-
+  apply(P, c(2, 3), function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+
+# solution 2: with a loop
+QoImean <- matrix(NA, nrow = 4, ncol = n_scenarios)
+QoICI <- array(NA, dim = c(2,     # lower and upper bound
+                           4,     # number of categories
+                           10))   # number of scenarios
+
+
+for (i in 1:n_scenarios) {
+  QoImean[,i] <- apply(P[, , i], 2, mean)
+  QoICI[,,i] <- apply(P[, , i], 2, function(x)
+    quantile(x, probs = c(0.025, 0.975)))
+  
+}
+```
+
+
+```{r}
+partycolors <- c("mediumseagreen", 
+                 "green", 
+                 "red", 
+                 "orange")
+
+# if you did everything correctly, you can plot your results
+plot(
+  incomeScenario,
+  QoImean[1,],
+  type = "n",
+  ylim = c(0, 0.65),
+  bty = "n",
+  ylab = "Predicted Probability of voting for Party",
+  xlab = "income Variable",
+  main = "The Effect of Income",
+  las = 1
+)
+
+for (i in 1:4) {
+  polygon(
+    c(rev(incomeScenario), incomeScenario),
+    c(rev(QoICI[1, i,]), QoICI[2, i,]),
+    col = adjustcolor(partycolors[i], alpha = 0.2),
+    border = NA
+  )
+}
+
+for (i in 1:4) {
+  lines(x = incomeScenario, 
+        y = QoImean[i,], 
+        col = partycolors[i],
+        lwd = 2)
+}
+
+legend(
+  "topright",
+  legend = levels(df$vote),
+  lty = 1,
+  col = partycolors,
+  bty = "n"
+)
+```
+
+
+## Conditional Logit
+
+In the last session we looked at the multinomial logit that dealt with unordered choices (multinomial choices) where our predictor variables were **chooser-specific**. However, in principle, predictor variables could vary over choices only (and be constant over individuals a.k.a. **choice-specific**), vary over choices and individuals (**chooser- AND choice-specific**), or -- as seen in the last session -- vary only over individuals. 
+
+  + **chooser-specific**: Variables that vary across individuals
+    + income
+    + education
+    + religion
+    + left-right position of the respondent
+    + ...
+  + **choice-specific**: Variables that vary across choices
+    + party family
+    + left-right position of the party
+  + **chooser- and choice-specific**: Variables that vary across individuals and choices
+    + e.g. distance between respondent and party left-right position
+
+The multinomial choice model we looked at last week allowed us to include chooser-specific variables. 
+
+The **conditional logit model** is appropriate for multinomial choice data **when predictors vary over choices or choices and individuals**. Even more general, such models allow for all kinds of predictor variables at the same time.
+
+Let's look at the multinomial choice model from the last session and see how we can extend it to get a conditional choice model. The systematic component of the utility for the multinomial choice model is:
+
+$$
+V_{ij} = X_i\beta_j
+$$
+
+The probability that individual $i$ chooses choice $j$ is:
+
+$$
+\text{Pr}(y_i = j) = \frac{\exp(\mathbf{X}_{i}{\beta_j})}{\sum_{j=0}^J \exp(\mathbf{X}_{i}{\beta_j)}}
+$$
+Note that $X_i$ contains only chooser specific variables. In many applications -- also in the one we are going to take a closer look at today -- we would want to estimate a model that also includes variables that vary over individuals **and** choices. To achieve this, we can write the systematic component like this:
+
+$$
+V_{ij} = \mathbf{X}_{i}\beta_j + \mathbf{W}_{ij}{\gamma}
+$$
+
+Like last week, let's focus on the indexation for a moment:
+
+  + $i$ indicates individual observations, in our case voters.
+  + $j$ indicates choices of the outcome variable, in our case vote choices for different parties.
+  
+With this in mind, let's see what we have here:
+
+  + $V_{ij}$: For each voter $i$, this formula computes utilities of voting for all parties $j$. This is the utility of voter $i$ to vote for the CDA, D66, PcdA, and VVD.
+  + $X_i$: This is nothing new, just our matrix of covariates, i.e. information on income, class, religion, and so on for each voter $i$.
+  + $\beta_j$: $\beta$ is indexed by $j$. $j$ are the available choices. This means that we have one $\beta$ vector for each outcome choice. 
+  + $W_{ij}$: A second matrix of covariates (like $X_i$), but this time subscripted with $i$ and $j$. Thus, $W_{ij}$ stores covariates that vary across individuals **and** choices (for example the left-right distance between a voter and a party.
+  + $\gamma$ has no subscript at all. Consequentially, it does not vary between choices, there is only one $\gamma$ vector! Why? Left-right distance should affect the utilities to vote for specific parties in the same way.
+  
+$$
+\text{Pr}(y_i = j) = \frac{\exp(\mathbf{X}_{i}{\beta_j} + \mathbf{W}_{ij}{\gamma})}{\sum_{j=1}^J \exp(\mathbf{X}_{i}{\beta_j} + \mathbf{W}_{ij}{\gamma})}
+$$
+
+One more time: In this model, the effects $\beta_j$ of **chooser-specific** variables vary across the alternatives while $\gamma$ does not.
+
+## Getting it into `R`
+
+We start with a specific example and then generalize the function. Our working example is a simple **spatial proximity model**: The central hypothesis of this theoretical model reads as follows:
+
+> The smaller the ideological distance between the respondent and a candidate or party, the higher the probability that the respondent votes for the candidate or party. 
+
+We would like to test this hypothesis. So the systematic part of the model we want to estimate is:
+
+$$
+V_{ij} = \beta_j + \gamma \times \text{Distance}_j
+$$
+**Note**: No chooser-specific covariate matrix $X$. Thus, $\beta_j$ only conatains choice-specific intercepts.
+
+We will work with the same data as last week.
+
+```{r}
+head(df)
+table(df$vote)
+```
+
+The variables we are mainly interested in today are the ideological distances between each respondent and each party. Clearly, these variables are individual and party specific (**chooser and choice-specific**). So we need to change the systematic component of our multinomial logit model from last week. For reference, here is last week's function that allowed for choose specific variables:
+
+
+```{r The Multinomial Logit LL}
+ll_mnl <- function(theta, X, Z) {
+  # declarations
+  k <- ncol(X)
+  J <- ncol(Z)
+  
+  # create matrix of betas and set the first category to 0
+  beta <- matrix(0, 
+                 ncol = k, 
+                 nrow = J)
+  beta[-1, ] <- matrix(theta[1:(k * (J - 1))], 
+                       ncol = k, 
+                       byrow = T)
+  
+  # utilities, systematic part
+  V <- apply(beta, 1, function(b)
+    X %*% b)
+  
+  # Sum of exp(V)
+  Sexp <- apply(V, 1, function(v)
+    sum(exp(v)))
+  
+  # probabilities
+  P <- apply(V, 2, function(v)
+    exp(v) / Sexp)
+  
+  # log-likelihood
+  loglik <- sum(log(P[Z]))
+  return(loglik)
+}
+```
+
+## Exercise session: Setting up the log-likelihood function
+
+Get together with your neighbors: I would like you to think and talk about the following questions:
+
+  - **Where is the systematic component?**
+  - **How do we need to change it?**
+
+Do this for the specific problem:
+
+  - **What data do we want to pass to our function?**
+  - **What parameters do we need to estimate?**
+
+Start with the code for the Multinomial Logit and change it in the right places.
+
+```{r, eval=F}
+ll_clDis <- function(theta, W, Z) {
+  # declarations
+  J <- ncol(Z)
+  N <- nrow(W)
+  
+  # betas and gammas
+  beta <- c(0, theta[1:(J - 1)])
+  gamma <- theta[J]
+  
+  # calculate V_ij
+  V <- matrix(NA, ncol = J, nrow = N)
+  for (j in 1:J) {
+    V[, j] <- beta[j] + gamma * W[, j]
+  }
+  
+  # probabilities
+  Sexp <- apply(V, 1, function(x)
+    sum(exp(x)))
+  P <- apply(V, 2, function(x)
+    exp(x) / Sexp)
+  
+  # log-likelihood
+  loglik <- sum(log(P[Z]))
+  return(loglik)
+}
+```
+
+Does it work?
+
+```{r, eval=F}
+cats <- sort(unique(df$vote))
+Z <- sapply(cats, function(x)
+  df$vote == x)
+
+# make sure distances are in the same order as the columns of Z
+W <-
+  as.matrix(df[, c("distCDA", 
+                   "distD66", 
+                   "distPvdA", 
+                   "distVVD")]) 
+
+
+startvals <- rep(0, 4)
+
+
+# Check whether the function works
+
+ll_clDis(startvals, W, Z)
+
+# Then we can optimize it.
+
+res <- optim(
+  startvals,
+  ll_clDis,
+  W = W,
+  Z = Z,
+  method = "BFGS",
+  control = list(fnscale = -1, trace = TRUE),
+  hessian = TRUE
+)
+res
+```
+
+Let's take another look at the systematic component of the utility:
+
+```{r, eval = F} 
+for (j in 1:J) {
+  V[, j] <- beta[j] + gamma * W[, j]
+}
+```
+
+In principle, this function could take different forms. An alternative to the spatial model is the directional voting model which proposes a different relationship between ideological distance and vote choice. You are working with this model in the homework assignment.
+
+Let's try to make our code even more general. The hybrid model's systematic component is:
+
+$$
+V_{ij} = \mathbf{X}_{i}\beta_j + \mathbf{W}_{ij}{\gamma}
+$$
+Notice that $X_i$ is a matrix of covariates with $i$ rows and $k$ -- the number of covariates -- columns. Each covariate is a vector $i \times 1$. What about $W_{ij}$? This is already a matrix, just the individuals and the categories. What if we have several covariates that vary across both individuals and categories? There are two solutions: either we write the systematic component down specifically for the problem, or we have to go three-dimensional. We can think of $W_{ij}$ as a list. Remember, a list is like a book. On each page (which symbolizes a covariate) there is a matrix with $i$ rows and $j$ columns. And the book has $k$ pages. (This is very similar to the arrays we worked with, however, with slightly different behavior in R.)  
+
+```{r}
+ll_cl <- function(theta, X, W, Z) {
+  # W has to be a list!
+  
+  # declarations
+  k1 <- ncol(X)   # The number of chooser specific covariates
+  k2 <- length(W) # The number of choice specific covariates
+  J <- ncol(Z)    # The number of options to choose from
+  N <- nrow(X)    # The number of observations
+  
+  # create matrix of betas
+  beta <- matrix(0, nrow = J, ncol = k1)
+  beta[-1,] <- matrix(theta[1:(k1 * (J - 1))],
+                      nrow = J - 1,
+                      ncol = k1,
+                      byrow = T)
+  
+  gamma <- theta[(k1 * (J - 1) + 1):(k1 * (J - 1) + k2)]
+  
+  ## utilities, systematic part
+  
+  # individual specific (X_i * beta_j)
+  V1 <- apply(beta, 1, function(b)
+    X %*% b)
+  
+  # individual and choice specific (W_ij * gamma)
+  V2 <-
+    matrix(apply(mapply("*", W, gamma), 1, sum), 
+           nrow = N, 
+           ncol = J)
+  
+  # sum the two parts of the utility
+  V <- V1 + V2
+  
+  # probabilities
+  Sexp <- apply(V, 1, function(x)
+    sum(exp(x)))
+  P <- apply(V, 2, function(x)
+    exp(x) / Sexp)
+  
+  # log-likelihood
+  loglik <- sum(log(P[Z]))
+  return(loglik)
+}
+```
+
+With this function, we can easily use more variables on both the individual and the individual-choice level. Let's add some of the individual covariates:
+
+```{r}
+X <- as.matrix(cbind(1, df[, 6:ncol(df)]))
+
+# W as list
+W <- list(as.matrix(df[, c("distCDA", 
+                           "distD66",
+                           "distPvdA", 
+                           "distVVD")]))
+
+startvals <- rep(0, (ncol(X) * (ncol(Z) - 1) + length(W)))
+
+# Z is the same as before
+
+res <- optim(
+  startvals,
+  ll_cl,
+  X = X,
+  W = W,
+  Z = Z,
+  method = "BFGS",
+  control = list(fnscale = -1, trace = TRUE),
+  hessian = TRUE
+)
+res$par
+```
+
+Let's order this a bit
+
+```{r}
+beta_hat <- res$par[1:(ncol(X) * (ncol(Z) - 1))]
+se_beta <- sqrt(diag(solve(-res$hessian)))[1:(ncol(X) * (ncol(Z) - 1))]
+
+ind_specific <- cbind(beta_hat, se_beta)
+
+colnames(ind_specific) <- c("Estimate", "SE")
+rownames(ind_specific) <- 
+  rep(c("Intercept", colnames(X)[2:ncol(X)]), 3)
+rownames(ind_specific) <- 
+  paste0(rownames(ind_specific),
+         rep(paste0(" (", levels(df$vote)[2:ncol(Z)], ")"), each = ncol(X)))
+
+gamma_hat <- res$par[(ncol(X) * (ncol(Z) - 1)) + 1]
+se_gamma <- sqrt(diag(solve(-res$hessian)))[(ncol(X) * (ncol(Z) - 1)) + 1]
+
+ind_choice_specific <- cbind(gamma_hat, se_gamma)
+colnames(ind_choice_specific) <- c("Estimate", "SE")
+rownames(ind_choice_specific) <- c("Distance")
+
+cat("Individual & choice specific\n", rep("=", 20), "\n")
+ind_choice_specific 
+cat("\n\n Individual specific\n", rep("=", 20), "\n")
+ind_specific
+```
+
+Sure, there are packages for this in `R`. For example the package `mlogit`. To use it, we have to be careful how to format the data. Currently, our data is in the wide format. For `mlogit` we have to change it into the long format.
+
+```{r}
+# our data is in wide format
+df$respondent <- seq(1:nrow(df))
+
+# colnames must be clearly identifiable
+colnames(df)[2:5] <-
+  c("dist.D66", "dist.PvdA", "dist.VVD", "dist.CDA")
+
+# reshape data
+df_long <-
+  mlogit.data(df,
+              shape = "wide",
+              varying = 2:5,
+              choice = "vote")
+
+head(df_long)
+```
+
+Now, we can put it into the `mlogit()` function...
+
+We have: 
+  - choocer and choice specific 
+    - `dist`
+  - chooser-specific
+    - `relig`
+    - `class`
+    - `income`
+    - `educ`
+    - `age`
+    - `urban`
+
+```{r} 
+m1 <-
+  mlogit(vote ~ dist | relig + class + income + educ + age + urban,
+         data = df_long)
+summary(m1)
+```
+
+## Concluding Remarks
+
+You will play around with conditional logit a little more in the homework assignment. And most importantly, you will implement Quantities-of-Interest for the Conditional Logit! As announced last week, it is a challenging homework. It's the peak of AQM, so climb that hill, I'll promise that things will get easier after it.
+
+
