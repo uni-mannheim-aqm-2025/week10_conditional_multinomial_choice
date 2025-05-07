@@ -430,31 +430,7 @@ Do this for the specific problem:
 Start with the code for the Multinomial Logit and change it in the right places.
 
 ```{r, eval=F}
-ll_clDis <- function(theta, W, Z) {
-  # declarations
-  J <- ncol(Z)
-  N <- nrow(W)
-  
-  # betas and gammas
-  beta <- c(0, theta[1:(J - 1)])
-  gamma <- theta[J]
-  
-  # calculate V_ij
-  V <- matrix(NA, ncol = J, nrow = N)
-  for (j in 1:J) {
-    V[, j] <- beta[j] + gamma * W[, j]
-  }
-  
-  # probabilities
-  Sexp <- apply(V, 1, function(x)
-    sum(exp(x)))
-  P <- apply(V, 2, function(x)
-    exp(x) / Sexp)
-  
-  # log-likelihood
-  loglik <- sum(log(P[Z]))
-  return(loglik)
-}
+ll_clDis <- ?
 ```
 
 Does it work?
